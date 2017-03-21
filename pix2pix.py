@@ -221,7 +221,7 @@ def visualize_response_maps(name, responses, num_cols=4, use_color=True):
 
 def dense(tensor, size):
     with tf.variable_scope("dense"):
-        W = tf.get_variable("weights", [tensor.get_shape()[-1], size], initializer=tf.random_normal_initializer(0, 0.02))
+        W = tf.get_variable("weights", [a.batch_size, tensor.get_shape()[-1], size], initializer=tf.random_normal_initializer(0, 0.02))
         b = tf.get_variable("bias", [size], initializer=tf.constant_initializer(0))
         output = tf.matmul(tensor, W) + b
         return output
@@ -606,8 +606,9 @@ def create_model(inputs, targets):
         gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
         #hack: use softmax loss
         #gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        labels = tf.reshape(targets, [a.batch_size, -1])
+        labels = tf.cast(tf.reshape(targets, [a.batch_size, -1]), tf.int32)
         outputs_for_loss = tf.reshape(goutput, [a.batch_size, -1])
+        outputs_for_loss = tf.expand_dims(outputs_for_loss, -1)
         logits = dense(outputs_for_loss, 2)
 
         gen_loss_L1 = tf.reduece_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits))
