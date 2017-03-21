@@ -34,7 +34,7 @@ parser.add_argument("--batch_size", type=int, default=1, help="number of images 
 parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
 parser.add_argument("--ngf", type=int, default=64, help="number of generator filters in first conv layer")
 parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
-parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
+parser.add_argument("--scale_size", type=int, default=1140, help="scale images to this size before cropping to 256x256")
 parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
 parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
 parser.set_defaults(flip=True)
@@ -48,7 +48,7 @@ parser.add_argument("--output_filetype", default="png", choices=["png", "jpeg"])
 a = parser.parse_args()
 
 EPS = 1e-12
-CROP_SIZE = 256
+CROP_SIZE = 1024
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_L1, gen_grads_and_vars, train")
@@ -90,7 +90,137 @@ def augment(image, brightness):
     return rgb
 
 
-def conv(batch_input, out_channels, stride):
+def grayscale_to_rgb(imgs):
+  """Given a list of grayscale images in a tensor, convert them into color
+  images based on the relative value of the pixels with respect to the min/max
+  of the tensor. This is similar to Matlab's rocket gradient for imshow.
+
+  Args:
+    images: tensor of shape [n, h, w, 1] or [n, h, w]
+  Returns:
+    images: tensor of shape [n, h, w, 3], the same type as the input
+  """
+  n, h, w, c = [int(d) for d in imgs.get_shape()]
+  if c != 1:
+    raise ValueError("The number of channels must be 1")
+  # Set the RGB lookup values for each channel.
+  r = tf.concat([tf.constant(0, shape=[384]), tf.range(0, 256),
+                 tf.constant(255, shape=[256]),
+                 tf.reverse(tf.range(128, 256), [0])],
+                0)
+  g = tf.concat([tf.constant(0, shape=[128]), tf.range(0, 256),
+                 tf.constant(255, shape=[256]),
+                 tf.reverse(tf.range(0, 256), [0]),
+                 tf.constant(0, shape=[128])],
+                0)
+  b = tf.concat([tf.range(128, 256), tf.constant(255, shape=[256]),
+                 tf.reverse(tf.range(0, 256), [0]),
+                 tf.constant(0, shape=[384])],
+                0)
+  rgb = tf.concat([tf.expand_dims(r, -1), tf.expand_dims(g, -1),
+                   tf.expand_dims(b, -1)],
+                  1)
+  rgb = tf.cast(rgb, imgs.dtype)
+  lookup_range = int(rgb.get_shape()[0])
+
+  # Scale the images' values to the lookup range based on max and min.
+  min_vals = tf.reshape(tf.reduce_min(imgs, [1, 2, 3]), [n, 1, 1, 1])
+  max_vals = tf.reshape(tf.reduce_max(imgs, [1, 2, 3]), [n, 1, 1, 1])
+  imgs = imgs - min_vals
+  imgs = tf.cast(imgs / (max_vals - min_vals) * lookup_range, tf.int32)
+  imgs = tf.minimum(lookup_range - 1, tf.maximum(0, imgs))
+
+  result = tf.squeeze(tf.gather(rgb, imgs), [-2])
+  return result
+
+
+
+def gen_img_grid(imgs, num_cols=None, padding=0):
+  """Put a list of images to a grid. If num_cols is not specified, all
+  images will be fit into a grid with the same number of rows as columns.
+
+  Args:
+    imgs: a tensor of shape: [num_imgs, heihgt, width, num_channels].
+    num_cols: number of cols in the grid, if not specified, square grid is used.
+    padding: number of pixel padding around each image in the grid.
+  Returns:
+    grid_img: tensor of shape [1, H, W, num_channels] that represents the grid
+              image.
+
+  TODO(willsong): If each image is non-square, instead of using square grid, use
+  a better ratio of rows/cols to maximize screen estate.
+
+  TODO(willsong): Currently there's a tensorflow bug where if the image
+  summaries are tall rectangles, they will overlap. There's an ongoing issue
+  on Tensorflow's issue tracker. Alternatively we can draw everything in a
+  square but it'd be too difficult to see for layers with hundreds of filters.
+  https://github.com/tensorflow/tensorflow/issues/2862
+  """
+  num_imgs = int(imgs.get_shape()[0])
+  if num_cols is not None:
+    num_rows = int(np.ceil(num_imgs / num_cols))
+  else:
+    num_rows = int(np.ceil(np.sqrt(int(imgs.get_shape()[0]))))
+    num_cols = num_rows
+  paddings = [(0, num_cols * num_rows - num_imgs),
+              (padding, padding), (padding, padding), (0, 0)]
+  imgs = tf.pad(imgs, paddings)
+  imgs = tf.reshape(
+      imgs, (num_rows, num_cols) + tuple(imgs.get_shape().as_list()[1:]))
+  imgs = tf.transpose(imgs, (0, 2, 1, 3, 4))
+  img_shape = [int(d) for d in imgs.get_shape()]
+  imgs = tf.reshape(
+      imgs, [1, num_rows * img_shape[1], num_cols * img_shape[3], img_shape[4]])
+  return imgs
+
+
+def image_summary(name, images, reverse_channels=False):
+  """Visualizes images based on tf.summary.image and
+  switches BGR color channels to RGB color channels if needed.
+
+  Args:
+    name: name to be shown in tensorboard
+    images: images tensor with shape [batch_size, height, width, channels]
+    reverse_channels: whether or not to reverse the channels
+    (usually used to change BGR to RGB)
+  """
+  if reverse_channels:
+    images = tf.reverse(images, [3])
+  tf.summary.image(name, images)
+
+
+def visualize_kernel(name, kernel, reverse_channels=False):
+  """Visualize kernels in a padded square.
+
+  Args:
+    name: name to be shown in tensorboard
+    kernel: kernel tensor: [h, w, num_input_chnanels, num_output_channels]
+  Returns:
+    nothing
+  """
+  kernel = tf.transpose(kernel, [3, 0, 1, 2])
+  grid = gen_img_grid(kernel, padding=1)
+  image_summary(name, grid, reverse_channels=reverse_channels)
+
+
+def visualize_response_maps(name, responses, num_cols=4, use_color=True):
+  """Visualize response maps of a particular image.
+
+  Args:
+    name: name to be shown in tensorboard
+    responses: response tensor: [h, w, num_outputs]
+  Returns:
+    nothing
+  """
+  responses = tf.transpose(responses, [2, 0, 1])
+  responses = tf.expand_dims(responses, -1)
+  if use_color:
+    responses = grayscale_to_rgb(responses)
+  grid = gen_img_grid(responses, num_cols, padding=1)
+  image_summary(name + '_rm', grid)
+
+
+def conv(batch_input, out_channels, stride, visualize=False, name=None):
     with tf.variable_scope("conv"):
         in_channels = batch_input.get_shape()[3]
         filter = tf.get_variable("filter", [4, 4, in_channels, out_channels], dtype=tf.float32, initializer=tf.random_normal_initializer(0, 0.02))
@@ -98,6 +228,9 @@ def conv(batch_input, out_channels, stride):
         #     => [batch, out_height, out_width, out_channels]
         padded_input = tf.pad(batch_input, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="CONSTANT")
         conv = tf.nn.conv2d(padded_input, filter, [1, stride, stride, 1], padding="VALID")
+        if visualize:
+            visualize_kernel(name + '/filters', filter)
+            visualize_response_maps(name + '/responses', conv[0, :, :, :])
         return conv
 
 
@@ -333,21 +466,25 @@ def create_generator(generator_inputs, generator_outputs_channels):
 
     # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
     with tf.variable_scope("encoder_1"):
-        output = conv(generator_inputs, a.ngf, stride=2)
+        output = conv(generator_inputs, a.ngf, stride=2, visualize=True, name='gconv1')
         layers.append(output)
 
     layer_specs = [
         a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
         a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
         a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-        a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-        a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-        a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-        a.ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
+        #a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
+        #a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
+        #a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
+        #a.ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
+        #a.ngf * 8,
+        #a.ngf * 8,
     ]
 
+    i = 2
     for out_channels in layer_specs:
         with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
+            i += 1
             rectified = lrelu(layers[-1], 0.2)
             # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
             convolved = conv(rectified, out_channels, stride=2)
@@ -355,10 +492,12 @@ def create_generator(generator_inputs, generator_outputs_channels):
             layers.append(output)
 
     layer_specs = [
-        (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
-        (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-        (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-        (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
+        #(a.ngf * 8, 0.5),
+        #(a.ngf * 8, 0.5),
+        #(a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
+        #(a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
+        #(a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
+        #(a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
         (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
         (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
         (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
@@ -398,7 +537,8 @@ def create_generator(generator_inputs, generator_outputs_channels):
 
 def create_model(inputs, targets):
     def create_discriminator(discrim_inputs, discrim_targets):
-        n_layers = 3
+        #n_layers = 3
+        n_layers = 1
         layers = []
 
         # 2x [batch, height, width, in_channels] => [batch, height, width, in_channels * 2]
@@ -406,6 +546,7 @@ def create_model(inputs, targets):
 
         # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
         with tf.variable_scope("layer_1"):
+            #convolved = conv(input, a.ndf, stride=2, visualize=True, name='dconv1')
             convolved = conv(input, a.ndf, stride=2)
             rectified = lrelu(convolved, 0.2)
             layers.append(rectified)
@@ -424,6 +565,7 @@ def create_model(inputs, targets):
 
         # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
         with tf.variable_scope("layer_%d" % (len(layers) + 1)):
+            #convolved = conv(rectified, out_channels=1, stride=1, visualize=True, name='dconv5')
             convolved = conv(rectified, out_channels=1, stride=1)
             output = tf.sigmoid(convolved)
             layers.append(output)
@@ -716,10 +858,10 @@ def main():
     with sv.managed_session() as sess:
         print("parameter_count =", sess.run(parameter_count))
 
-        if a.checkpoint is not None:
-            print("loading model from checkpoint")
-            checkpoint = tf.train.latest_checkpoint(a.checkpoint)
-            saver.restore(sess, checkpoint)
+        #if a.checkpoint is not None:
+        #    print("loading model from checkpoint")
+        #    checkpoint = tf.train.latest_checkpoint(a.checkpoint)
+        #    saver.restore(sess, checkpoint)
 
         max_steps = 2**32
         if a.max_epochs is not None:
