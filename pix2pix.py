@@ -611,7 +611,7 @@ def create_model(inputs, targets):
         outputs_for_loss = tf.expand_dims(outputs_for_loss, -1)
         logits = dense(outputs_for_loss, 2)
 
-        gen_loss_L1 = tf.reduece_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits))
+        gen_loss_L1 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits))
 
         gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
 
