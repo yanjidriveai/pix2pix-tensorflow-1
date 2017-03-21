@@ -422,8 +422,7 @@ def load_examples():
             width = tf.shape(raw_input)[1] # [height, width, channels]
             a_images = preprocess(raw_input[:,:width//2,:])
 
-            #hack: keep b image as 0, 1 label
-            b_images = raw_input[:,width//2:,:]
+            b_images = preprocess(raw_input[:,width//2:,:])
 
     if a.which_direction == "AtoB":
         inputs, targets = [a_images, b_images]
@@ -455,9 +454,7 @@ def load_examples():
         input_images = transform(inputs)
 
     with tf.name_scope("target_images"):
-        #target_images = transform(targets)
-        # hack: do not do flip. resize, crop on target images
-        target_images = targets
+        target_images = transform(targets)
 
     paths_batch, inputs_batch, targets_batch = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
     steps_per_epoch = int(math.ceil(len(input_paths) / a.batch_size))
