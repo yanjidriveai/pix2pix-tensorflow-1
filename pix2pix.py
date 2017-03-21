@@ -219,6 +219,12 @@ def visualize_response_maps(name, responses, num_cols=4, use_color=True):
   grid = gen_img_grid(responses, num_cols, padding=1)
   image_summary(name + '_rm', grid)
 
+def dense(tensor, size):
+    with tf.variable_scope("dense"):
+        W = tf.get_variable("weights", [tensor.get_shape()[-1], size], initializer=tf.random_normal_initializer(0, 0.02))
+        b = tf.get_variable("bias", [size], initializer=tf.constant_initializer(0))
+        output = tf.matmul(tensor, W) + b
+        return output
 
 def conv(batch_input, out_channels, stride, visualize=False, name=None):
     with tf.variable_scope("conv"):
@@ -415,7 +421,9 @@ def load_examples():
             # break apart image pair and move to range [-1, 1]
             width = tf.shape(raw_input)[1] # [height, width, channels]
             a_images = preprocess(raw_input[:,:width//2,:])
-            b_images = preprocess(raw_input[:,width//2:,:])
+
+            #hack: keep b image as 0, 1 label
+            b_images = raw_input[:,width//2:,:]
 
     if a.which_direction == "AtoB":
         inputs, targets = [a_images, b_images]
@@ -447,7 +455,9 @@ def load_examples():
         input_images = transform(inputs)
 
     with tf.name_scope("target_images"):
-        target_images = transform(targets)
+        #target_images = transform(targets)
+        # hack: do not do flip. resize, crop on target images
+        target_images = targets
 
     paths_batch, inputs_batch, targets_batch = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
     steps_per_epoch = int(math.ceil(len(input_paths) / a.batch_size))
@@ -481,10 +491,8 @@ def create_generator(generator_inputs, generator_outputs_channels):
         #a.ngf * 8,
     ]
 
-    i = 2
     for out_channels in layer_specs:
         with tf.variable_scope("encoder_%d" % (len(layers) + 1)):
-            i += 1
             rectified = lrelu(layers[-1], 0.2)
             # [batch, in_height, in_width, in_channels] => [batch, in_height/2, in_width/2, out_channels]
             convolved = conv(rectified, out_channels, stride=2)
@@ -529,7 +537,7 @@ def create_generator(generator_inputs, generator_outputs_channels):
         input = tf.concat([layers[-1], layers[0]], axis=3)
         rectified = tf.nn.relu(input)
         output = deconv(rectified, generator_outputs_channels)
-        output = tf.tanh(output)
+        #output = tf.tanh(output)
         layers.append(output)
 
     return layers[-1]
@@ -574,7 +582,8 @@ def create_model(inputs, targets):
 
     with tf.variable_scope("generator") as scope:
         out_channels = int(targets.get_shape()[-1])
-        outputs = create_generator(inputs, out_channels)
+        goutput = create_generator(inputs, out_channels)
+        outputs = tf.tanh(goutput)
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
@@ -598,7 +607,14 @@ def create_model(inputs, targets):
         # predict_fake => 1
         # abs(targets - outputs) => 0
         gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
-        gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
+        #hack: use softmax loss
+        #gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
+        labels = tf.reshape(targets, [a.batch_size, -1])
+        outputs_for_loss = tf.reshape(goutput, [a.batch_size, -1])
+        logits = dense(outputs_for_loss, 2)
+
+        gen_loss_L1 = tf.reduece_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits))
+
         gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
 
     with tf.name_scope("discriminator_train"):
@@ -730,7 +746,8 @@ def main():
         batch_input = tf.expand_dims(input_image, axis=0)
 
         with tf.variable_scope("generator") as scope:
-            batch_output = deprocess(create_generator(preprocess(batch_input), 3))
+            goutput = create_generator(preprocess(batch_input), 3)
+            batch_output = deprocess(tf.tanh(goutput))
 
         output_image = tf.image.convert_image_dtype(batch_output, dtype=tf.uint8)[0]
         if a.output_filetype == "png":
