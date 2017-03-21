@@ -12,6 +12,7 @@ import random
 import collections
 import math
 import time
+from tensorflow.python import debug as tf_debug
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", help="path to folder containing images")
@@ -36,7 +37,7 @@ parser.add_argument("--ngf", type=int, default=64, help="number of generator fil
 parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
 parser.add_argument("--scale_size", type=int, default=1140, help="scale images to this size before cropping to 256x256")
 parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
-parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
+parser.add_argument("--debug", dest="debug", action="store_true", help="use debug")
 parser.set_defaults(flip=True)
 parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
 parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
@@ -871,6 +872,9 @@ def main():
     logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
     sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
     with sv.managed_session() as sess:
+        if a.debug:
+          sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+          sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
         print("parameter_count =", sess.run(parameter_count))
 
         #if a.checkpoint is not None:
