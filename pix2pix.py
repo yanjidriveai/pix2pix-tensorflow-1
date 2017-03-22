@@ -414,6 +414,7 @@ def load_examples():
             raw_input = tf.identity(raw_input)
 
         raw_input.set_shape([None, None, 3])
+        labels = tf.squeeze(labels.set_shape([None, None, 1]))
 
         if a.lab_colorization:
             # load color and brightness from image, no B image exists here
@@ -460,14 +461,14 @@ def load_examples():
     with tf.name_scope("target_images"):
         target_images = transform(targets)
 
-    paths_batch, inputs_batch, targets_batch = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
+    paths_batch, inputs_batch, targets_batch, labels_batch = tf.train.batch([paths, input_images, target_images, labels], batch_size=a.batch_size)
     steps_per_epoch = int(math.ceil(len(input_paths) / a.batch_size))
 
     return Examples(
         paths=paths_batch,
         inputs=inputs_batch,
         targets=targets_batch,
-        labels=labels,
+        labels=labels_batch,
         count=len(input_paths),
         steps_per_epoch=steps_per_epoch,
     )
@@ -796,7 +797,6 @@ def main():
 
     examples = load_examples()
     print("examples count = %d" % examples.count)
-
     # inputs and targets are [batch_size, height, width, channels]
     model = create_model(examples.inputs, examples.targets, examples.labels)
 
