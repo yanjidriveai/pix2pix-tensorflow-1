@@ -38,6 +38,7 @@ parser.add_argument("--ndf", type=int, default=64, help="number of discriminator
 parser.add_argument("--scale_size", type=int, default=1140, help="scale images to this size before cropping to 256x256")
 parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
 parser.add_argument("--debug", dest="debug", action="store_true", help="use debug")
+parser.add_argument("--softmax", dest="softmax", action="store_true", help="use softmax")
 parser.set_defaults(flip=True)
 parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
 parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
@@ -406,7 +407,7 @@ def load_examples():
         raw_input = decode(contents)
         raw_input_greyscale = decode(contents, channels=1)
         width = tf.shape(raw_input)[1]
-        labels = raw_input_greyscale[:,width//2:,:]
+        labels = raw_input_greyscale[:,width//2:,:] // 255
         raw_input = tf.image.convert_image_dtype(raw_input, dtype=tf.float32)
 
         assertion = tf.assert_equal(tf.shape(raw_input)[2], 3, message="image does not have 3 channels")
@@ -414,7 +415,8 @@ def load_examples():
             raw_input = tf.identity(raw_input)
 
         raw_input.set_shape([None, None, 3])
-        labels = tf.squeeze(labels.set_shape([None, None, 1]))
+        labels.set_shape([1024, 1024, 1])
+        labels = tf.squeeze(labels)
 
         if a.lab_colorization:
             # load color and brightness from image, no B image exists here
@@ -612,17 +614,17 @@ def create_model(inputs, targets, labels):
         gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
 
         #hack: use softmax loss
-        #gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-
-        labels = tf.cast(tf.reshape(labels, [a.batch_size, -1]), tf.int32)
-        #labels = tf.cast(tf.ones_like(labels), tf.int32)
-        outputs_for_loss = tf.reshape(goutput, [a.batch_size, -1])
-        outputs_for_loss = tf.expand_dims(outputs_for_loss, -1)
-        logits = dense(outputs_for_loss, 2)
-        tf.summary.histogram("logits/values", logits)
-        tf.summary.histogram("labels/values", labels)
-        
-        gen_loss_L1 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits))
+        if not a.softmax:
+            gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
+        else:
+            labels = tf.cast(tf.reshape(labels, [a.batch_size, -1]), tf.int32)
+            goutput = tf.reduce_sum(goutput, axis=3)
+            outputs_for_loss = tf.reshape(goutput, [a.batch_size, -1])
+            outputs_for_loss = tf.expand_dims(outputs_for_loss, -1)
+            logits = dense(outputs_for_loss, 2)
+            tf.summary.histogram("logits/values", logits)
+            tf.summary.histogram("labels/values", labels)
+            gen_loss_L1 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits))
 
         #gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
         gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
@@ -886,9 +888,9 @@ def main():
           sess = tf_debug.LocalCLIDebugWrapperSession(sess)
           sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
         print("parameter_count =", sess.run(parameter_count))
+        #print(examples.labels.get_shape())
         labels = sess.run(examples.labels)
-        
-        print(np.unique(labels))
+        print(np.count_nonzero(labels))
         #if a.checkpoint is not None:
         #    print("loading model from checkpoint")
         #    checkpoint = tf.train.latest_checkpoint(a.checkpoint)
