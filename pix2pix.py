@@ -404,8 +404,9 @@ def load_examples():
         reader = tf.WholeFileReader()
         paths, contents = reader.read(path_queue)
         raw_input = decode(contents)
+        raw_input_greyscale = decode(contents, channels=1)
         width = tf.shape(raw_input)[1]
-        labels = raw_input[:,width//2:,:] / 255
+        labels = raw_input_greyscale[:,width//2:,:]
         raw_input = tf.image.convert_image_dtype(raw_input, dtype=tf.float32)
 
         assertion = tf.assert_equal(tf.shape(raw_input)[2], 3, message="image does not have 3 channels")
