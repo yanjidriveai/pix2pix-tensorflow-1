@@ -51,7 +51,7 @@ a = parser.parse_args()
 EPS = 1e-12
 CROP_SIZE = 1024
 
-Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
+Examples = collections.namedtuple("Examples", "paths, inputs, targets, labels, count, steps_per_epoch")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_L1, gen_grads_and_vars, train")
 
 
@@ -404,6 +404,8 @@ def load_examples():
         reader = tf.WholeFileReader()
         paths, contents = reader.read(path_queue)
         raw_input = decode(contents)
+        width = tf.shape(raw_input)[1]
+        labels = raw_input[:,width//2:,:] / 255
         raw_input = tf.image.convert_image_dtype(raw_input, dtype=tf.float32)
 
         assertion = tf.assert_equal(tf.shape(raw_input)[2], 3, message="image does not have 3 channels")
@@ -464,6 +466,7 @@ def load_examples():
         paths=paths_batch,
         inputs=inputs_batch,
         targets=targets_batch,
+        labels=labels,
         count=len(input_paths),
         steps_per_epoch=steps_per_epoch,
     )
@@ -541,7 +544,7 @@ def create_generator(generator_inputs, generator_outputs_channels):
     return layers[-1]
 
 
-def create_model(inputs, targets):
+def create_model(inputs, targets, labels):
     def create_discriminator(discrim_inputs, discrim_targets):
         #n_layers = 3
         n_layers = 1
@@ -605,15 +608,21 @@ def create_model(inputs, targets):
         # predict_fake => 1
         # abs(targets - outputs) => 0
         gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
+
         #hack: use softmax loss
         #gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        labels = tf.cast(tf.reshape(targets, [a.batch_size, -1]), tf.int32)
+
+        labels = tf.cast(tf.reshape(labels, [a.batch_size, -1]), tf.int32)
+        #labels = tf.cast(tf.ones_like(labels), tf.int32)
         outputs_for_loss = tf.reshape(goutput, [a.batch_size, -1])
         outputs_for_loss = tf.expand_dims(outputs_for_loss, -1)
         logits = dense(outputs_for_loss, 2)
-
+        tf.summary.histogram("logits/values", logits)
+        tf.summary.histogram("labels/values", labels)
+        
         gen_loss_L1 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits))
 
+        #gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
         gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
 
     with tf.name_scope("discriminator_train"):
@@ -788,7 +797,7 @@ def main():
     print("examples count = %d" % examples.count)
 
     # inputs and targets are [batch_size, height, width, channels]
-    model = create_model(examples.inputs, examples.targets)
+    model = create_model(examples.inputs, examples.targets, examples.labels)
 
     # undo colorization splitting on images that we use for display/output
     if a.lab_colorization:
@@ -876,7 +885,9 @@ def main():
           sess = tf_debug.LocalCLIDebugWrapperSession(sess)
           sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
         print("parameter_count =", sess.run(parameter_count))
-
+        labels = sess.run(examples.labels)
+        
+        print(np.unique(labels))
         #if a.checkpoint is not None:
         #    print("loading model from checkpoint")
         #    checkpoint = tf.train.latest_checkpoint(a.checkpoint)
