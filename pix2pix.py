@@ -39,6 +39,7 @@ parser.add_argument("--scale_size", type=int, default=1140, help="scale images t
 parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
 parser.add_argument("--debug", dest="debug", action="store_true", help="use debug")
 parser.add_argument("--softmax", dest="softmax", action="store_true", help="use softmax")
+parser.add_argument("--cropcenter", dest="cropcenter", action="store_true", help="crops out center")
 parser.set_defaults(flip=True)
 parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
 parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
@@ -445,6 +446,9 @@ def load_examples():
         r = image
         if a.flip:
             r = tf.image.random_flip_left_right(r, seed=seed)
+
+        if a.cropcenter:
+            r = tf.image.crop_to_bounding_box(r, 256, 256, 512, 512)
 
         # area produces a nice downscaling, but does nearest neighbor for upscaling
         # assume we're going to be doing downscaling here
